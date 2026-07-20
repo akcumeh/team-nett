@@ -1,0 +1,10 @@
+node_modules
+.claude
+dist
+.env
+.env.local
+coverage
+.DS_Store
+*.log
+.vercel
+W**.md
