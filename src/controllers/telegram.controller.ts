@@ -8,12 +8,13 @@ import * as invoiceRepo from '../repositories/invoice.repository.js';
 import * as budgetRepo from '../repositories/budget.repository.js';
 import * as sessionRepo from '../repositories/session.repository.js';
 import * as auditRepo from '../repositories/audit.repository.js';
-import { ensureUser, resolveActor } from '../services/context.service.js';
+import { ensureUser, resolveActor, type ActorContext } from '../services/context.service.js';
 import { getBot } from '../services/telegram.service.js';
 import { validateAccount, getBanks, isMockMode } from '../services/monnify.service.js';
 import { createRequest, decide, pay, authorize, companyForRequest } from '../services/request.service.js';
 import { createInvoice, reconcileInvoice, applyProviderPayment } from '../services/invoice.service.js';
 import { renderBudget, renderDashboard } from '../services/finance.service.js';
+import { extractInvoiceFromImage } from '../services/ai.service.js';
 import { UserFacingError, errorMessage } from '../utils/errors.js';
 import { hasRole, canPay } from '../utils/permissions.js';
 import { rateLimit } from '../utils/rateLimit.js';
@@ -62,7 +63,12 @@ FINANCE CONTROL
 /budget Category | Amount
 /budgets
 /status REFERENCE
-/cancel`;
+/cancel
+
+AI INVOICE SCAN
+Send a clear invoice photo with caption: /scaninvoice Vendor Nickname
+No caption? Send the photo alone, then /scaninvoice Vendor Nickname within 10 minutes.
+The extracted details are always shown for human confirmation before a request is created.`;
 
 function commandText(ctx: Context): string {
     let text = '';
@@ -779,6 +785,168 @@ bot.action(/^details:(.+)$/, async (ctx) => {
     const ref = ctx.match[1]!.toUpperCase();
     const { request } = await membershipForRequest(ctx, ref);
     await reply(ctx, await renderRequest(request));
+});
+
+function pickPhotoSize(sizes: Array<{ file_id: string; width: number; height: number }>): string {
+    let photo = sizes[sizes.length - 1]!;
+    for (const size of sizes) {
+        const longEdge = Math.max(size.width, size.height);
+        if (longEdge <= 1600) {
+            photo = size;
+        }
+    }
+    return photo.file_id;
+}
+
+async function runInvoiceScan(
+    ctx: Context,
+    actor: ActorContext,
+    vendorNickname: string,
+    fileId: string,
+): Promise<void> {
+    const vendor = await vendorRepo.findByNickname(actor.company.id, vendorNickname);
+    if (!vendor) {
+        throw new UserFacingError(`Vendor "${vendorNickname}" was not found. Add it with /vendor first.`);
+    }
+
+    const link = await ctx.telegram.getFileLink(fileId);
+    const response = await fetch(link);
+    if (!response.ok) {
+        throw new Error('Could not download the Telegram image.');
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+
+    const extracted = await extractInvoiceFromImage(
+        bytes,
+        response.headers.get('content-type') ?? 'image/jpeg',
+    );
+    if (!extracted.amountKobo || extracted.confidence < 0.45) {
+        throw new UserFacingError(
+            'I could not confidently read the total. Send a clearer image or create the request manually.',
+        );
+    }
+
+    let purpose = extracted.purpose;
+    if (!purpose) {
+        purpose = `Invoice ${extracted.invoiceNumber ?? ''}`.trim();
+    }
+
+    await sessionRepo.set(actor.user.id, 'CONFIRM_SCANNED_INVOICE', {
+        companyId: actor.company.id,
+        vendorId: vendor.id,
+        amountKobo: extracted.amountKobo,
+        purpose,
+        category: extracted.category ?? 'General',
+        invoiceFileId: fileId,
+    });
+
+    await reply(
+        ctx,
+        `AI INVOICE DRAFT\nSupplier detected: ${extracted.supplierName ?? 'not clear'}\nSaved vendor: ${vendor.nickname}\nAmount: ${money(extracted.amountKobo)}\nPurpose: ${purpose || 'Invoice payment'}\nCategory: ${extracted.category ?? 'General'}\nConfidence: ${Math.round(extracted.confidence * 100)}%\n\nNothing will be submitted until you confirm.`,
+        Markup.inlineKeyboard([
+            Markup.button.callback('Create request', 'scan:confirm'),
+            Markup.button.callback('Cancel', 'scan:cancel'),
+        ]),
+    );
+}
+
+// Some clients cannot attach a caption to a photo, so /scaninvoice also works as
+// a follow-up text command: a bare photo in a private chat is remembered for ten
+// minutes and scanned when the command arrives.
+bot.command('scaninvoice', async (ctx) => {
+    const actor = await resolveActor(ctx);
+    if (!hasRole(actor.membership.role, 'requester')) {
+        throw new UserFacingError('Your role cannot scan invoices.');
+    }
+    const vendorNickname = commandText(ctx);
+    if (!vendorNickname) {
+        throw new UserFacingError('Use: /scaninvoice Vendor Nickname');
+    }
+
+    const session = await sessionRepo.get(actor.user.id);
+    if (!session || session.state !== 'PENDING_SCAN_PHOTO') {
+        throw new UserFacingError(
+            'Send the invoice photo first (with or without a caption), then run /scaninvoice Vendor Nickname.',
+        );
+    }
+
+    await runInvoiceScan(ctx, actor, vendorNickname, String(session.context.fileId));
+});
+
+bot.on(message('photo'), async (ctx) => {
+    const caption = ctx.message.caption ?? '';
+    const captionHasCommand = /^\/scaninvoice(?:@\w+)?\b/i.test(caption);
+
+    if (!captionHasCommand) {
+        let userId: string;
+        if (ctx.chat.type === 'private') {
+            const user = await ensureUser(ctx);
+            userId = user.id;
+        } else {
+            try {
+                const actor = await resolveActor(ctx);
+                userId = actor.user.id;
+            } catch {
+                return;
+            }
+        }
+        const fileId = pickPhotoSize(ctx.message.photo);
+        await sessionRepo.set(userId, 'PENDING_SCAN_PHOTO', { fileId }, 10);
+        await reply(
+            ctx,
+            'Photo received. To scan it as an invoice, send /scaninvoice Vendor Nickname within 10 minutes, or /cancel to discard it.',
+        );
+        return;
+    }
+
+    const actor = await resolveActor(ctx);
+    if (!hasRole(actor.membership.role, 'requester')) {
+        throw new UserFacingError('Your role cannot scan invoices.');
+    }
+
+    const vendorNickname = caption.replace(/^\/scaninvoice(?:@\w+)?\s*/i, '').trim();
+    if (!vendorNickname) {
+        throw new UserFacingError('Add the saved vendor nickname in the caption: /scaninvoice Vendor Nickname');
+    }
+
+    await runInvoiceScan(ctx, actor, vendorNickname, pickPhotoSize(ctx.message.photo));
+});
+
+bot.action('scan:cancel', async (ctx) => {
+    await ctx.answerCbQuery('Cancelled');
+    const user = await ensureUser(ctx);
+    await sessionRepo.clear(user.id);
+    await ctx.editMessageText('Scanned invoice draft cancelled.').catch(() => undefined);
+});
+
+bot.action('scan:confirm', async (ctx) => {
+    await ctx.answerCbQuery();
+    const user = await ensureUser(ctx);
+    const session = await sessionRepo.get(user.id);
+    if (!session || session.state !== 'CONFIRM_SCANNED_INVOICE') {
+        throw new UserFacingError('This scanned invoice draft expired. Please scan it again.');
+    }
+
+    const companyId = String(session.context.companyId);
+    const membership = await companyRepo.getMembership(companyId, user.id);
+    const company = await companyRepo.findById(companyId);
+    const vendor = await vendorRepo.findById(String(session.context.vendorId));
+    if (!membership || !company || !vendor) {
+        throw new UserFacingError('The company or vendor could not be found.');
+    }
+
+    const request = await createRequest({
+        company,
+        requester: user,
+        vendor,
+        amountKobo: Number(session.context.amountKobo),
+        purpose: String(session.context.purpose),
+        category: String(session.context.category),
+        invoiceFileId: String(session.context.invoiceFileId),
+    });
+    await sessionRepo.clear(user.id);
+    await ctx.editMessageText(await renderRequest(request), requestKeyboard(request.ref)).catch(() => undefined);
+    await notifyRoom(company, await renderRequest(request), requestKeyboard(request.ref));
 });
 
 bot.on(message('text'), async (ctx) => {
