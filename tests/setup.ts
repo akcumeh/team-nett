@@ -1,1 +1,11 @@
-import 'dotenv/config';
+process.env.NODE_ENV = 'test';
+process.env.TG_BOT_TOKEN = '123456789:TEST-TOKEN-TEST-TOKEN-TEST-TOKEN-TEST';
+process.env.TG_WEBHOOK_SECRET = 'test-telegram-webhook-secret';
+process.env.SUPABASE_URL = 'https://example.supabase.co';
+process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role';
+process.env.PUBLIC_BASE_URL = 'https://nett-test.example.com';
+process.env.MONNIFY_MODE = 'mock';
+process.env.MONNIFY_DISBURSEMENTS_ENABLED = 'false';
+process.env.MONNIFY_MFA_ENABLED = 'true';
+process.env.SIMULATION_BANNER = 'true';
+process.env.CRON_SECRET = 'test-cron-secret';
