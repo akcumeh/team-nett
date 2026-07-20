@@ -74,15 +74,23 @@ export function getConfig(): AppConfig {
 
     const e = parsed.data;
 
+    let monnifyBaseUrl = 'https://sandbox.monnify.com';
+    if (e.MONNIFY_MODE === 'live') {
+        monnifyBaseUrl = 'https://api.monnify.com';
+    }
+
     if (e.MONNIFY_MODE !== 'mock') {
-        const missing = [
-            ['MONNIFY_API_KEY', e.MONNIFY_API_KEY],
-            ['MONNIFY_SECRET_KEY', e.MONNIFY_SECRET_KEY],
-            ['MONNIFY_CONTRACT_CODE', e.MONNIFY_CONTRACT_CODE],
-        ]
-            .filter(([, value]) => !value)
-            .map(([key]) => key);
-        if (missing.length) {
+        const missing: string[] = [];
+        if (!e.MONNIFY_API_KEY) {
+            missing.push('MONNIFY_API_KEY');
+        }
+        if (!e.MONNIFY_SECRET_KEY) {
+            missing.push('MONNIFY_SECRET_KEY');
+        }
+        if (!e.MONNIFY_CONTRACT_CODE) {
+            missing.push('MONNIFY_CONTRACT_CODE');
+        }
+        if (missing.length > 0) {
             throw new Error(
                 `Missing Monnify variables for ${e.MONNIFY_MODE} mode: ${missing.join(', ')}`,
             );
@@ -106,10 +114,7 @@ export function getConfig(): AppConfig {
             disbursementsEnabled: e.MONNIFY_DISBURSEMENTS_ENABLED,
             mfaEnabled: e.MONNIFY_MFA_ENABLED,
             webhookSignatureMode: e.MONNIFY_WEBHOOK_SIGNATURE_MODE,
-            baseUrl:
-                e.MONNIFY_MODE === 'live'
-                    ? 'https://api.monnify.com'
-                    : 'https://sandbox.monnify.com',
+            baseUrl: monnifyBaseUrl,
         },
         anthropicApiKey: e.ANTHROPIC_API_KEY,
         anthropicModel: e.ANTHROPIC_MODEL,

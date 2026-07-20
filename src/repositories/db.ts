@@ -22,7 +22,12 @@ export function assertData<T>(
     error: { message: string; code?: string } | null,
     context: string,
 ): T {
-    if (error) throw Object.assign(new Error(`${context}: ${error.message}`), { code: error.code });
-    if (data === null) throw new Error(`${context}: no data returned`);
+    if (error) {
+        const wrapped = new Error(`${context}: ${error.message}`);
+        throw Object.assign(wrapped, { code: error.code });
+    }
+    if (data === null) {
+        throw new Error(`${context}: no data returned`);
+    }
     return data;
 }
