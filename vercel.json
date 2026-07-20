@@ -1,0 +1,20 @@
+{
+    "$schema": "https://openapi.vercel.sh/vercel.json",
+    "functions": {
+        "api/**/*.ts": {
+            "maxDuration": 30
+        }
+    },
+    "rewrites": [
+        { "source": "/health", "destination": "/api/index" },
+        { "source": "/payment/return", "destination": "/api/index" },
+        { "source": "/demo/pay/:ref", "destination": "/api/index" },
+        { "source": "/webhooks/monnify", "destination": "/api/index" }
+    ],
+    "crons": [
+        {
+            "path": "/api/cron/daily",
+            "schedule": "0 7 * * *"
+        }
+    ]
+}
