@@ -27,8 +27,8 @@ export interface ExtractedInvoice {
     confidence: number;
 }
 
-interface AnthropicResponse {
-    content?: Array<{ type: string; text?: string }>;
+interface GeminiResponse {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
     error?: { message?: string };
 }
 
@@ -48,8 +48,8 @@ export async function extractInvoiceFromImage(
     mediaType: string,
 ): Promise<ExtractedInvoice> {
     const config = getConfig();
-    if (!config.anthropicApiKey) {
-        throw new Error('ANTHROPIC_API_KEY is not configured.');
+    if (!config.geminiApiKey) {
+        throw new Error('GEMINI_API_KEY is not configured.');
     }
 
     let supportedMediaType = 'image/jpeg';
@@ -57,52 +57,46 @@ export async function extractInvoiceFromImage(
         supportedMediaType = mediaType;
     }
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.geminiModel}:generateContent?key=${config.geminiApiKey}`;
+    const response = await fetch(url, {
         method: 'POST',
-        headers: {
-            'x-api-key': config.anthropicApiKey,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json',
-        },
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-            model: config.anthropicModel,
-            max_tokens: 900,
-            temperature: 0,
-            system: 'You extract invoice facts for a finance approval workflow. Never invent details. If a value is not visible, use null. Return only valid JSON and no markdown.',
-            messages: [
+            contents: [
                 {
                     role: 'user',
-                    content: [
-                        {
-                            type: 'image',
-                            source: {
-                                type: 'base64',
-                                media_type: supportedMediaType,
-                                data: imageBytes.toString('base64'),
-                            },
-                        },
-                        { type: 'text', text: PROMPT },
+                    parts: [
+                        { inline_data: { mime_type: supportedMediaType, data: imageBytes.toString('base64') } },
+                        { text: PROMPT },
                     ],
                 },
             ],
+            systemInstruction: {
+                parts: [
+                    {
+                        text: 'You extract invoice facts for a finance approval workflow. Never invent details. If a value is not visible, use null. Return only valid JSON and no markdown.',
+                    },
+                ],
+            },
+            generationConfig: { temperature: 0, maxOutputTokens: 900 },
         }),
     });
 
-    const body = (await response.json()) as AnthropicResponse;
+    const body = (await response.json()) as GeminiResponse;
     if (!response.ok) {
-        throw new Error(`Anthropic invoice extraction failed: ${body.error?.message ?? response.statusText}`);
+        throw new Error(`Gemini invoice extraction failed: ${body.error?.message ?? response.statusText}`);
     }
 
-    const text = body.content?.find((block) => block.type === 'text')?.text;
+    const text = body.candidates?.[0]?.content?.parts?.[0]?.text;
     if (!text) {
-        throw new Error('Anthropic returned no invoice extraction text.');
+        throw new Error('Gemini returned no invoice extraction text.');
     }
 
     let parsed: unknown;
     try {
         parsed = JSON.parse(cleanJson(text));
     } catch {
-        throw new Error('Anthropic returned invoice data that was not valid JSON.');
+        throw new Error('Gemini returned invoice data that was not valid JSON.');
     }
 
     const extracted = invoiceSchema.parse(parsed);

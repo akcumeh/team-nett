@@ -22,8 +22,8 @@ const envSchema = z.object({
     MONNIFY_DISBURSEMENTS_ENABLED: bool,
     MONNIFY_MFA_ENABLED: bool,
     MONNIFY_WEBHOOK_SIGNATURE_MODE: z.enum(['auto', 'hmac', 'legacy']).default('auto'),
-    ANTHROPIC_API_KEY: z.string().optional(),
-    ANTHROPIC_MODEL: z.string().default('claude-haiku-4-5'),
+    GEMINI_API_KEY: z.string().optional(),
+    GEMINI_MODEL: z.string().default('gemini-2.5-flash-lite'),
     ADMIN_TELEGRAM_ID: z.string().optional(),
     DEFAULT_REQUIRED_APPROVALS: z.coerce.number().int().min(1).max(10).default(2),
     DAILY_DIGEST_HOUR_UTC: z.coerce.number().int().min(0).max(23).default(7),
@@ -50,8 +50,8 @@ export type AppConfig = {
         webhookSignatureMode: 'auto' | 'hmac' | 'legacy';
         baseUrl: string;
     };
-    anthropicApiKey?: string;
-    anthropicModel: string;
+    geminiApiKey?: string;
+    geminiModel: string;
     adminTelegramId?: string;
     defaultRequiredApprovals: number;
     dailyDigestHourUtc: number;
@@ -116,8 +116,8 @@ export function getConfig(): AppConfig {
             webhookSignatureMode: e.MONNIFY_WEBHOOK_SIGNATURE_MODE,
             baseUrl: monnifyBaseUrl,
         },
-        anthropicApiKey: e.ANTHROPIC_API_KEY,
-        anthropicModel: e.ANTHROPIC_MODEL,
+        geminiApiKey: e.GEMINI_API_KEY,
+        geminiModel: e.GEMINI_MODEL,
         adminTelegramId: e.ADMIN_TELEGRAM_ID,
         defaultRequiredApprovals: e.DEFAULT_REQUIRED_APPROVALS,
         dailyDigestHourUtc: e.DAILY_DIGEST_HOUR_UTC,
