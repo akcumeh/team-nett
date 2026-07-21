@@ -51,5 +51,6 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
         sent = sent + 1;
     }
 
+    console.log(`daily cron done: ${sent} digest(s) sent across ${companies.length} linked company(ies)`);
     res.json({ ok: true, digestsSent: sent });
 }

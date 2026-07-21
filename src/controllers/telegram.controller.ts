@@ -166,10 +166,36 @@ async function membershipForRequest(ctx: Context, ref: string): Promise<{
     return { request, membership, userId: user.id };
 }
 
+// one log line per update so deployment logs always show activity.
+bot.use(async (ctx, next) => {
+    const started = Date.now();
+    let what = ctx.updateType as string;
+    if (ctx.callbackQuery && 'data' in ctx.callbackQuery) {
+        what = `callback ${ctx.callbackQuery.data}`;
+    } else if (ctx.message && 'text' in ctx.message) {
+        if (ctx.message.text.startsWith('/')) {
+            what = `command ${ctx.message.text.split(/\s/)[0]}`;
+        } else {
+            what = 'text';
+        }
+    } else if (ctx.message && 'photo' in ctx.message) {
+        what = 'photo';
+    }
+
+    try {
+        await next();
+    } finally {
+        const from = ctx.from?.id ?? 'unknown';
+        const chatType = ctx.chat?.type ?? '?';
+        console.log(`tg update from ${from} in ${chatType}: ${what} (${Date.now() - started}ms)`);
+    }
+});
+
 bot.use(async (ctx, next) => {
     if (ctx.from) {
         const allowed = rateLimit(`tg:${ctx.from.id}`, 20, 60_000);
         if (!allowed) {
+            console.warn(`tg rate-limited user ${ctx.from.id}`);
             if (ctx.callbackQuery) {
                 await ctx.answerCbQuery('Slow down a little.').catch(() => undefined);
             } else {
@@ -178,7 +204,25 @@ bot.use(async (ctx, next) => {
             return;
         }
     }
+
+    // Log the action, never the arguments: /authorize carries an OTP and free
+    // text can carry anything, so only the command word or button id is kept.
+    let action: string = ctx.updateType;
+    if (ctx.message && 'text' in ctx.message && ctx.message.text.startsWith('/')) {
+        action = ctx.message.text.split(/[\s|]/)[0]!;
+    } else if (ctx.callbackQuery && 'data' in ctx.callbackQuery) {
+        action = `button:${ctx.callbackQuery.data}`;
+    } else if (ctx.message && 'photo' in ctx.message) {
+        action = 'photo';
+    } else if (ctx.message && 'text' in ctx.message) {
+        action = 'text';
+    }
+
+    const started = Date.now();
     await next();
+    console.log(
+        `tg ${action} from=${ctx.from?.id ?? 'unknown'} chat=${ctx.chat?.type ?? 'unknown'} took=${Date.now() - started}ms`,
+    );
 });
 
 bot.catch(async (error, ctx) => {

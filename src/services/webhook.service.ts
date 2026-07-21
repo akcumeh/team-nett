@@ -32,6 +32,7 @@ export async function processMonnifyWebhook(payload: any, rawBody: string): Prom
 
     const claimed = await webhookRepo.claim('monnify', key, type, payload);
     if (!claimed) {
+        console.log(`monnify webhook duplicate dropped: ${key}`);
         return;
     }
 
@@ -45,6 +46,7 @@ export async function processMonnifyWebhook(payload: any, rawBody: string): Prom
         }
 
         await webhookRepo.finish(key);
+        console.log(`monnify webhook processed: ${key}`);
     } catch (error) {
         let message = String(error);
         if (error instanceof Error) {

@@ -19,6 +19,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     // Any POST without the secret token we registered via setWebhook is a forgery.
     if (!verifyTelegramSecret(supplied, getConfig().tgWebhookSecret)) {
+        console.warn('tg webhook rejected: missing or invalid secret token');
         res.status(401).send('unauthorized');
         return;
     }
