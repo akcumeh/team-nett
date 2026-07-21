@@ -39,12 +39,14 @@ SETUP
 /createcompany Company Name
 /companies
 /linkroom [company slug]  - run inside a Telegram group
+/unlinkroom [company slug]  - owner only, run inside a Telegram group
 /invite approver
 /join INVITE_CODE
 /policy 2
 
 VENDORS AND PAYMENTS
-/vendor Nickname | Account Number | Bank Code | Legal Name
+/vendor Nickname  - pick a bank from buttons, then /vendoraccount 0123456789
+/vendor Nickname | Account Number | Bank Code | Legal Name  - all at once
 /vendors
 /request Amount | Vendor Nickname | Purpose | Category
 /requests
@@ -96,7 +98,16 @@ async function reply(
     }
     chunks.push(remaining);
     for (const chunk of chunks) {
-        await ctx.reply(chunk, extra);
+        try {
+            await ctx.reply(chunk, extra);
+        } catch (error) {
+            if (extra && 'parse_mode' in extra) {
+                console.warn('reply parse_mode failed, retrying as plain text:', errorMessage(error));
+                await ctx.reply(chunk);
+            } else {
+                throw error;
+            }
+        }
     }
 }
 
@@ -227,11 +238,11 @@ bot.use(async (ctx, next) => {
 
 bot.catch(async (error, ctx) => {
     console.error('Telegram handler error:', error);
-    let text = 'Something went wrong. The error was logged; please try again.';
+    let text = "That didn't work. Check the command and its arguments, or send /help for the full list.";
     if (error instanceof UserFacingError) {
         text = error.message;
     }
-    await reply(ctx, text).catch(() => undefined);
+    await reply(ctx, text, { parse_mode: 'Markdown' }).catch(() => undefined);
 });
 
 bot.start(async (ctx) => {
@@ -271,7 +282,8 @@ bot.command('createcompany', async (ctx) => {
     });
     await reply(
         ctx,
-        `Company created: ${company.name}\nSlug: ${company.slug}\n\nNext: create a Telegram group, add this bot, then run /linkroom ${company.slug} inside the group.`,
+        `Company created: ${company.name}\nSlug: \`${company.slug}\`\n\nNext: create a Telegram group, add this bot, then tap this to copy, then paste it in the group:\n\`/linkroom ${company.slug}\``,
+        { parse_mode: 'Markdown' },
     );
 });
 
@@ -331,6 +343,45 @@ bot.command('linkroom', async (ctx) => {
     );
 });
 
+bot.command('unlinkroom', async (ctx) => {
+    if (!ctx.chat || !['group', 'supergroup'].includes(ctx.chat.type)) {
+        throw new UserFacingError('Run /unlinkroom inside the group you want to unlink.');
+    }
+    const user = await ensureUser(ctx);
+    const slug = commandText(ctx).toLowerCase();
+
+    const candidates = await companyRepo.listAllByChatId(String(ctx.chat.id));
+    if (candidates.length === 0) {
+        throw new UserFacingError('This group is not linked to any NETT company.');
+    }
+
+    let target = candidates[0];
+    if (slug) {
+        target = candidates.find((company) => company.slug === slug);
+    } else if (candidates.length > 1) {
+        const slugs = candidates.map((company) => `\`${company.slug}\``).join(', ');
+        throw new UserFacingError(
+            `This group is linked to more than one company: ${slugs}. Use \`/unlinkroom SLUG\` to say which one.`,
+        );
+    }
+    if (!target) {
+        throw new UserFacingError(`No linked company matches slug "${slug}" in this group.`);
+    }
+    if (target.owner_user_id !== user.id) {
+        throw new UserFacingError('Only the company owner can unlink this room.');
+    }
+
+    await companyRepo.unlinkRoom(target.id);
+    await auditRepo.log({
+        companyId: target.id,
+        actorUserId: user.id,
+        action: 'telegram_room_unlinked',
+        entityType: 'company',
+        entityId: target.id,
+    });
+    await reply(ctx, `${target.name} has been unlinked from this group.`);
+});
+
 bot.command('invite', async (ctx) => {
     const actor = await resolveActor(ctx);
     if (!hasRole(actor.membership.role, 'admin')) {
@@ -349,7 +400,8 @@ bot.command('invite', async (ctx) => {
     );
     await reply(
         ctx,
-        `Invite created for role: ${role}\nCode: ${code}\nExpires in 7 days.\n\nThe person should open a private chat with NETT and send: /join ${code}`,
+        `Invite created for role: ${role}\nCode: \`${code}\`\nExpires in 7 days.\n\nThe person should open a private chat with @Nett_Finance_bot, tap this to copy, then paste it:\n\`/join ${code}\``,
+        { parse_mode: 'Markdown' },
     );
 });
 
@@ -407,15 +459,20 @@ bot.command('banks', async (ctx) => {
     await reply(ctx, `Supported banks (first 30):\n\n${lines.join('\n')}`);
 });
 
-bot.command('vendor', async (ctx) => {
-    const actor = await resolveActor(ctx);
-    if (!hasRole(actor.membership.role, 'requester')) {
-        throw new UserFacingError('Your role cannot add vendors.');
-    }
-    const [nickname, accountNumber, bankCode, legalName] = splitPipeArgs(commandText(ctx));
-    if (!nickname || !accountNumber || !bankCode) {
-        throw new UserFacingError('Use: /vendor Nickname | 0123456789 | 057 | Legal Business Name');
-    }
+const COMMON_BANK_NAMES = [
+    'access', 'gtbank', 'gtb', 'zenith', 'uba', 'first bank', 'firstbank',
+    'moniepoint', 'opay', 'kuda', 'wema', 'fidelity', 'union bank',
+    'sterling', 'stanbic', 'ecobank', 'polaris',
+];
+
+async function saveVendor(
+    ctx: Context,
+    actor: ActorContext,
+    nickname: string,
+    accountNumber: string,
+    bankCode: string,
+    legalName?: string,
+): Promise<void> {
     if (!/^\d{10}$/.test(accountNumber)) {
         throw new UserFacingError('The account number must contain exactly 10 digits.');
     }
@@ -451,6 +508,85 @@ bot.command('vendor', async (ctx) => {
         ctx,
         `Vendor saved and account checked.\n\nNickname: ${vendor.nickname}\nResolved account name: ${vendor.account_name}\nBank code: ${vendor.bank_code}\nAccount: ${maskAccount(vendor.account_number)}\nVerification: ${vendor.verification_source}`,
     );
+}
+
+bot.command('vendor', async (ctx) => {
+    const actor = await resolveActor(ctx);
+    if (!hasRole(actor.membership.role, 'requester')) {
+        throw new UserFacingError('Your role cannot add vendors.');
+    }
+    const args = splitPipeArgs(commandText(ctx));
+
+    if (args.length >= 3) {
+        const [nickname, accountNumber, bankCode, legalName] = args;
+        await saveVendor(ctx, actor, nickname!, accountNumber!, bankCode!, legalName);
+        return;
+    }
+
+    const nickname = args[0];
+    if (!nickname) {
+        throw new UserFacingError(
+            'Use: /vendor Nickname to pick a bank from a list, or /vendor Nickname | 0123456789 | 057 | Legal Business Name to enter everything at once.',
+        );
+    }
+
+    const banks = await getBanks();
+    const common = banks.filter((bank) =>
+        COMMON_BANK_NAMES.some((name) => bank.name.toLowerCase().includes(name)),
+    );
+    const shown = (common.length > 0 ? common : banks).slice(0, 15);
+
+    await sessionRepo.set(actor.user.id, 'AWAITING_VENDOR_BANK', { nickname }, 10);
+
+    const buttons = shown.map((bank) => Markup.button.callback(bank.name, `vendorbank:${bank.code}`));
+    const rows: ReturnType<typeof Markup.button.callback>[][] = [];
+    for (let i = 0; i < buttons.length; i += 2) {
+        rows.push(buttons.slice(i, i + 2));
+    }
+
+    await reply(
+        ctx,
+        `Which bank is ${nickname} with?\n\nNot listed? Check /banks for the full list and its code, then use \`/vendor ${nickname} | 0123456789 | CODE | Legal Business Name\` instead.`,
+        { parse_mode: 'Markdown', ...Markup.inlineKeyboard(rows) },
+    );
+});
+
+bot.action(/^vendorbank:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const bankCode = ctx.match[1]!;
+    const actor = await resolveActor(ctx);
+    const session = await sessionRepo.get(actor.user.id);
+    if (!session || session.state !== 'AWAITING_VENDOR_BANK') {
+        throw new UserFacingError('This vendor draft expired. Start again with /vendor Nickname.');
+    }
+
+    const nickname = String(session.context.nickname);
+    await sessionRepo.set(actor.user.id, 'AWAITING_VENDOR_ACCOUNT', { nickname, bankCode }, 10);
+    await ctx.editMessageText(
+        `Bank saved for ${nickname}. Now send the 10-digit account number:\n\`/vendoraccount 0123456789\``,
+        { parse_mode: 'Markdown' },
+    ).catch(() => undefined);
+});
+
+bot.command('vendoraccount', async (ctx) => {
+    const actor = await resolveActor(ctx);
+    if (!hasRole(actor.membership.role, 'requester')) {
+        throw new UserFacingError('Your role cannot add vendors.');
+    }
+    const [accountNumber, legalName] = splitPipeArgs(commandText(ctx));
+    if (!accountNumber) {
+        throw new UserFacingError('Use: /vendoraccount 0123456789');
+    }
+
+    const session = await sessionRepo.get(actor.user.id);
+    if (!session || session.state !== 'AWAITING_VENDOR_ACCOUNT') {
+        throw new UserFacingError('Start with /vendor Nickname first, then pick a bank.');
+    }
+
+    const nickname = String(session.context.nickname);
+    const bankCode = String(session.context.bankCode);
+    await sessionRepo.clear(actor.user.id);
+    await saveVendor(ctx, actor, nickname, accountNumber, bankCode, legalName);
 });
 
 bot.command('vendors', async (ctx) => {

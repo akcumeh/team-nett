@@ -46,8 +46,7 @@ export async function renderDashboard(company: Company): Promise<string> {
     }
 
     return [
-        'NETT FINANCE ROOM',
-        `${company.name}`,
+        `NETT FINANCE ROOM for ${company.name}`,
         '',
         'THIS MONTH',
         `Collected: ${money(d.collectedKobo, company.base_currency)}`,

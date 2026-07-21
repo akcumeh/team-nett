@@ -1,6 +1,7 @@
 import type { Company, Membership, Role } from '../types/domain.js';
 import { db, assertData } from './db.js';
 import { makeInviteCode, slugify } from '../utils/ids.js';
+import { UserFacingError } from '../utils/errors.js';
 
 export async function create(
     name: string,
@@ -76,11 +77,25 @@ export async function findByChatId(chatId: string): Promise<Company | null> {
         .from('nett_companies')
         .select('*')
         .eq('telegram_chat_id', chatId)
+        .order('created_at', { ascending: true })
+        .limit(1)
         .maybeSingle();
     if (result.error) {
         throw new Error(`find company room: ${result.error.message}`);
     }
     return result.data as Company | null;
+}
+
+export async function listAllByChatId(chatId: string): Promise<Company[]> {
+    const result = await db()
+        .from('nett_companies')
+        .select('*')
+        .eq('telegram_chat_id', chatId)
+        .order('created_at', { ascending: true });
+    if (result.error) {
+        throw new Error(`list companies for room: ${result.error.message}`);
+    }
+    return (result.data ?? []) as Company[];
 }
 
 export async function findById(companyId: string): Promise<Company | null> {
@@ -92,6 +107,14 @@ export async function findById(companyId: string): Promise<Company | null> {
 }
 
 export async function linkRoom(companyId: string, chatId: string, title: string): Promise<Company> {
+    const existing = await listAllByChatId(chatId);
+    const linkedToOther = existing.find((company) => company.id !== companyId);
+    if (linkedToOther) {
+        throw new UserFacingError(
+            `This group is already linked to ${linkedToOther.name} (${linkedToOther.slug}). Run \`/unlinkroom ${linkedToOther.slug}\` first if you meant to replace it.`,
+        );
+    }
+
     const result = await db()
         .from('nett_companies')
         .update({ telegram_chat_id: chatId, telegram_chat_title: title })
@@ -99,6 +122,16 @@ export async function linkRoom(companyId: string, chatId: string, title: string)
         .select('*')
         .single();
     return assertData(result.data as Company | null, result.error, 'link room');
+}
+
+export async function unlinkRoom(companyId: string): Promise<void> {
+    const result = await db()
+        .from('nett_companies')
+        .update({ telegram_chat_id: null, telegram_chat_title: null })
+        .eq('id', companyId);
+    if (result.error) {
+        throw new Error(`unlink room: ${result.error.message}`);
+    }
 }
 
 export async function setApprovalPolicy(companyId: string, count: number): Promise<void> {
@@ -150,6 +183,13 @@ export async function acceptInvite(
     const invite = inviteResult.data;
     if (!invite) {
         throw new Error('This invite is invalid, expired, or already used.');
+    }
+
+    const targetCompany = await findById(invite.company_id);
+    if (targetCompany?.owner_user_id === userId) {
+        throw new UserFacingError(
+            `You already own ${targetCompany.name} and keep owner access permanently. This invite would downgrade you, so it has been ignored.`,
+        );
     }
 
     const upsert = await db()
